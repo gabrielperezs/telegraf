@@ -1,6 +1,7 @@
 package minecraft
 
 import (
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -54,6 +55,7 @@ func (c *connector) Connect() (Connection, error) {
 	if err != nil {
 		return nil, err
 	}
+	log.Println("D! [inputs.minecraft] Authorized")
 
 	return &connection{rcon: rcon}, nil
 }
@@ -72,6 +74,7 @@ func (c *client) Connect() error {
 	if err != nil {
 		return err
 	}
+	log.Println("D! [inputs.minecraft] Connected")
 	c.conn = conn
 	return nil
 }
@@ -89,12 +92,14 @@ func (c *client) Players() ([]string, error) {
 		c.conn = nil
 		return nil, err
 	}
+	log.Printf("D! [inputs.minecraft] /scoreboard players list: %q", resp)
 
 	players, err := parsePlayers(resp)
 	if err != nil {
 		c.conn = nil
 		return nil, err
 	}
+	log.Printf("D! [inputs.minecraft] Players %v", players)
 
 	return players, nil
 }
@@ -112,12 +117,14 @@ func (c *client) Scores(player string) ([]Score, error) {
 		c.conn = nil
 		return nil, err
 	}
+	log.Printf("D! [inputs.minecraft] /scoreboard players list %s: %q", player, resp)
 
 	scores, err := parseScores(resp)
 	if err != nil {
 		c.conn = nil
 		return nil, err
 	}
+	log.Printf("D! [inputs.minecraft] Scores %v", scores)
 
 	return scores, nil
 }

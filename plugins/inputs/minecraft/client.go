@@ -87,12 +87,12 @@ func (c *client) Players() ([]string, error) {
 		}
 	}
 
-	resp, err := c.conn.Execute("/scoreboard players list")
+	resp, err := c.conn.Execute("scoreboard players list")
 	if err != nil {
 		c.conn = nil
 		return nil, err
 	}
-	log.Printf("D! [inputs.minecraft] /scoreboard players list: %q", resp)
+	log.Printf("D! [inputs.minecraft] scoreboard players list: %q", resp)
 
 	players, err := parsePlayers(resp)
 	if err != nil {
@@ -112,12 +112,12 @@ func (c *client) Scores(player string) ([]Score, error) {
 		}
 	}
 
-	resp, err := c.conn.Execute("/scoreboard players list " + player)
+	resp, err := c.conn.Execute("scoreboard players list " + player)
 	if err != nil {
 		c.conn = nil
 		return nil, err
 	}
-	log.Printf("D! [inputs.minecraft] /scoreboard players list %s: %q", player, resp)
+	log.Printf("D! [inputs.minecraft] scoreboard players list %s: %q", player, resp)
 
 	scores, err := parseScores(resp)
 	if err != nil {

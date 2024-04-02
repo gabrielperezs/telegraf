@@ -5,28 +5,27 @@ package conntrack
 
 import (
 	_ "embed"
-	"errors"
 	"fmt"
+	"io/ioutil"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
+	"path/filepath"
+
 	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/internal/choice"
 	"github.com/influxdata/telegraf/plugins/inputs"
-	"github.com/influxdata/telegraf/plugins/inputs/system"
 )
 
 //go:embed sample.conf
 var sampleConfig string
 
 type Conntrack struct {
-	ps      system.PS
-	Path    string
-	Dirs    []string
-	Files   []string
-	Collect []string
+	Path       string
+	Dirs       []string
+	Files      []string
+	ConnTable  string
+	ConnStates []string
 }
 
 const (
@@ -45,6 +44,8 @@ var dfltFiles = []string{
 	"nf_conntrack_max",
 }
 
+var dfltConnTable = "/proc/net/nf_conntrack"
+
 func (c *Conntrack) setDefaults() {
 	if len(c.Dirs) == 0 {
 		c.Dirs = dfltDirs
@@ -53,23 +54,25 @@ func (c *Conntrack) setDefaults() {
 	if len(c.Files) == 0 {
 		c.Files = dfltFiles
 	}
+
+	if c.ConnTable == "" {
+		c.ConnTable = dfltConnTable
+	}
 }
 
 func (*Conntrack) SampleConfig() string {
 	return sampleConfig
 }
-
-func (c *Conntrack) Init() error {
+func (c *Conntrack) Gather(acc telegraf.Accumulator) error {
 	c.setDefaults()
-
-	if err := choice.CheckSlice(c.Collect, []string{"all", "percpu"}); err != nil {
-		return fmt.Errorf("config option 'collect': %w", err)
+	if err := c.gatherCounters(acc); err != nil {
+		return err
 	}
-
+	c.gatherConnStates(acc)
 	return nil
 }
 
-func (c *Conntrack) Gather(acc telegraf.Accumulator) error {
+func (c *Conntrack) gatherCounters(acc telegraf.Accumulator) error {
 	var metricKey string
 	fields := make(map[string]interface{})
 
@@ -88,76 +91,55 @@ func (c *Conntrack) Gather(acc telegraf.Accumulator) error {
 				continue
 			}
 
-			contents, err := os.ReadFile(fName)
+			contents, err := ioutil.ReadFile(fName)
 			if err != nil {
-				acc.AddError(fmt.Errorf("failed to read file %q: %w", fName, err))
+				acc.AddError(fmt.Errorf("e! failed to read file '%s': %v", fName, err))
 				continue
 			}
 
 			v := strings.TrimSpace(string(contents))
 			fields[metricKey], err = strconv.ParseFloat(v, 64)
 			if err != nil {
-				acc.AddError(fmt.Errorf("failed to parse metric, expected number but "+
-					" found %q: %w", v, err))
+				acc.AddError(fmt.Errorf("e! failed to parse metric, expected number but "+
+					" found '%s': %v", v, err))
 			}
-		}
-	}
-
-	for _, metric := range c.Collect {
-		perCPU := metric == "percpu"
-		stats, err := c.ps.NetConntrack(perCPU)
-		if err != nil {
-			acc.AddError(fmt.Errorf("failed to retrieve conntrack statistics: %w", err))
-		}
-
-		if len(stats) == 0 {
-			acc.AddError(errors.New("conntrack input failed to collect stats"))
-		}
-
-		cpuTag := "all"
-		for i, sts := range stats {
-			if perCPU {
-				cpuTag = fmt.Sprintf("cpu%d", i)
-			}
-			tags := map[string]string{
-				"cpu": cpuTag,
-			}
-
-			statFields := map[string]interface{}{
-				"entries":        sts.Entries,       // entries in the conntrack table
-				"searched":       sts.Searched,      // conntrack table lookups performed
-				"found":          sts.Found,         // searched entries which were successful
-				"new":            sts.New,           // entries added which were not expected before
-				"invalid":        sts.Invalid,       // packets seen which can not be tracked
-				"ignore":         sts.Ignore,        // packets seen which are already connected to an entry
-				"delete":         sts.Delete,        // entries which were removed
-				"delete_list":    sts.DeleteList,    // entries which were put to dying list
-				"insert":         sts.Insert,        // entries inserted into the list
-				"insert_failed":  sts.InsertFailed,  // insertion attempted but failed (same entry exists)
-				"drop":           sts.Drop,          // packets dropped due to conntrack failure
-				"early_drop":     sts.EarlyDrop,     // dropped entries to make room for new ones, if maxsize reached
-				"icmp_error":     sts.IcmpError,     // Subset of invalid. Packets that can't be tracked d/t error
-				"expect_new":     sts.ExpectNew,     // Entries added after an expectation was already present
-				"expect_create":  sts.ExpectCreate,  // Expectations added
-				"expect_delete":  sts.ExpectDelete,  // Expectations deleted
-				"search_restart": sts.SearchRestart, // onntrack table lookups restarted due to hashtable resizes
-			}
-			acc.AddCounter(inputName, statFields, tags)
 		}
 	}
 
 	if len(fields) == 0 {
-		return errors.New("conntrack input failed to collect metrics, make sure that the kernel module is loaded")
+		return fmt.Errorf("Conntrack input failed to collect metrics. " +
+			"Is the conntrack kernel module loaded?")
 	}
 
 	acc.AddFields(inputName, fields, nil)
 	return nil
 }
 
+func (c *Conntrack) gatherConnStates(acc telegraf.Accumulator) error {
+	f, err := os.Open(c.ConnTable)
+	if err != nil {
+		if err == os.ErrNotExist {
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+
+	fields := make(map[string]interface{})
+
+	nf := newNfConntrack(f)
+
+	for k, v := range nf.counters {
+		fields[k] = v
+	}
+
+	acc.AddFields(inputName, fields, nil)
+
+	return nil
+}
+
 func init() {
 	inputs.Add(inputName, func() telegraf.Input {
-		return &Conntrack{
-			ps: system.NewSystemPS(),
-		}
+		return &Conntrack{}
 	})
 }

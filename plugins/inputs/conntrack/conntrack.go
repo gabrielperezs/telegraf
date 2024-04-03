@@ -4,10 +4,9 @@
 package conntrack
 
 import (
-	_ "embed"
 	"fmt"
-	"io/ioutil"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -17,14 +16,12 @@ import (
 	"github.com/influxdata/telegraf/plugins/inputs"
 )
 
-//go:embed sample.conf
-var sampleConfig string
-
 type Conntrack struct {
 	Path       string
 	Dirs       []string
 	Files      []string
-	ConnTable  string
+	Conntrack  bool
+	ConnTable  []string
 	ConnStates []string
 }
 
@@ -44,7 +41,7 @@ var dfltFiles = []string{
 	"nf_conntrack_max",
 }
 
-var dfltConnTable = "/proc/net/nf_conntrack"
+var dfltConnTable = []string{"/usr/sbin/conntrack", "-L", "-o", "extended"}
 
 func (c *Conntrack) setDefaults() {
 	if len(c.Dirs) == 0 {
@@ -55,21 +52,49 @@ func (c *Conntrack) setDefaults() {
 		c.Files = dfltFiles
 	}
 
-	if c.ConnTable == "" {
+	if len(c.ConnTable) == 0 {
 		c.ConnTable = dfltConnTable
 	}
 }
 
-func (*Conntrack) SampleConfig() string {
+func (c *Conntrack) Description() string {
+	return "Collects conntrack stats from the configured directories and files."
+}
+
+var sampleConfig = `
+   ## The following defaults would work with multiple versions of conntrack.
+   ## Note the nf_ and ip_ filename prefixes are mutually exclusive across
+   ## kernel versions, as are the directory locations.
+
+   ## Superset of filenames to look for within the conntrack dirs.
+   ## Missing files will be ignored.
+   files = ["ip_conntrack_count","ip_conntrack_max",
+            "nf_conntrack_count","nf_conntrack_max"]
+
+   ## Directories to search within for the conntrack files above.
+   ## Missing directrories will be ignored.
+   dirs = ["/proc/sys/net/ipv4/netfilter","/proc/sys/net/netfilter"]
+
+   ## Connections tracking table from Linux kernel
+   ## This metrics are only for servers with the nf_conntrack kerne module
+   ## and the conntrack command installed.
+
+   ## Use conntrack to enable the nf_conntrack metrics
+   conntrack = false
+   ## Change the location path as needed
+   conntable = ["/usr/sbin/conntrack", "-L", "-o", "extended"]
+`
+
+func (c *Conntrack) SampleConfig() string {
 	return sampleConfig
 }
+
 func (c *Conntrack) Gather(acc telegraf.Accumulator) error {
 	c.setDefaults()
 	if err := c.gatherCounters(acc); err != nil {
 		return err
 	}
-	c.gatherConnStates(acc)
-	return nil
+	return c.gatherConnStates(acc)
 }
 
 func (c *Conntrack) gatherCounters(acc telegraf.Accumulator) error {
@@ -91,16 +116,16 @@ func (c *Conntrack) gatherCounters(acc telegraf.Accumulator) error {
 				continue
 			}
 
-			contents, err := ioutil.ReadFile(fName)
+			contents, err := os.ReadFile(fName)
 			if err != nil {
-				acc.AddError(fmt.Errorf("e! failed to read file '%s': %v", fName, err))
+				acc.AddError(fmt.Errorf("E! failed to read file '%s': %v", fName, err))
 				continue
 			}
 
 			v := strings.TrimSpace(string(contents))
 			fields[metricKey], err = strconv.ParseFloat(v, 64)
 			if err != nil {
-				acc.AddError(fmt.Errorf("e! failed to parse metric, expected number but "+
+				acc.AddError(fmt.Errorf("E! failed to parse metric, expected number but "+
 					" found '%s': %v", v, err))
 			}
 		}
@@ -116,18 +141,28 @@ func (c *Conntrack) gatherCounters(acc telegraf.Accumulator) error {
 }
 
 func (c *Conntrack) gatherConnStates(acc telegraf.Accumulator) error {
-	f, err := os.Open(c.ConnTable)
-	if err != nil {
-		if err == os.ErrNotExist {
-			return nil
-		}
-		return err
+	if !c.Conntrack {
+		return nil
 	}
-	defer f.Close()
 
 	fields := make(map[string]interface{})
 
-	nf := newNfConntrack(f)
+	nf := newNfConntrack()
+
+	var cmd *exec.Cmd
+	if len(c.ConnTable) == 1 {
+		cmd = exec.Command(c.ConnTable[0])
+	} else {
+		cmd = exec.Command(c.ConnTable[0], c.ConnTable[1:]...)
+	}
+	cmd.Stdout = nf
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return err
+	}
 
 	for k, v := range nf.counters {
 		fields[k] = v
@@ -139,7 +174,5 @@ func (c *Conntrack) gatherConnStates(acc telegraf.Accumulator) error {
 }
 
 func init() {
-	inputs.Add(inputName, func() telegraf.Input {
-		return &Conntrack{}
-	})
+	inputs.Add(inputName, func() telegraf.Input { return &Conntrack{} })
 }
